@@ -17,6 +17,8 @@
 
 #dashboard {}
 
+#dashboard_items {}
+
 .GroupIndicator {
     display: inline-block;
     height: 10px;

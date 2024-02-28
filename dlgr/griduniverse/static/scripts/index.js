@@ -22,7 +22,8 @@ function Pixels(data, textures, opts) {
   var texturePromises = [];
   var texture;
 
-  opts.background = opts.background || [ 0.5, 0.5, 0.5 ];
+  // opts.background = opts.background || [ 0.5, 0.5, 0.5 ]; // changes grid lines
+opts.background = '#013220';
   opts.size = isnumber(opts.size) ? opts.size : 10;
   opts.padding = isnumber(opts.padding) ? opts.padding : 2;
 
@@ -46,7 +47,8 @@ function Pixels(data, textures, opts) {
   var canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
-  canvas.style.backgroundColor = '#1F1F1F';
+  // canvas.style.backgroundColor = '#1F1F1F'; 
+  canvas.style.backgroundColor = '#013300'; // changes color of tiles with items
   if (opts.root) opts.root.appendChild(canvas);
 
   var colors = opts.formatted ? data : convert(data);
@@ -72,7 +74,7 @@ function Pixels(data, textures, opts) {
   for (let row = 0; row < opts.size; row++) {
     let rowdata = [];
     for (let col = 0; col < opts.size; col++) {
-      rowdata.push([255, 255, 255]);
+      rowdata.push([0, 255, 0]);
     }
     initial_texture.push(rowdata);
   }
@@ -311,7 +313,7 @@ Pixels.prototype.update = function(data, textures) {
       if (has_texture) {
         texture_coords.push(self.positions[idx]);
       } else {
-        expanded_colors.push(colors[i]);
+        expanded_colors.push(colors[i]); // don't change 
         positions.push(self.positions[idx]);
       }
       idx++;

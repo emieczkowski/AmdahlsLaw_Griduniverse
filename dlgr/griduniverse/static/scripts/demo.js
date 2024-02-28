@@ -1089,6 +1089,7 @@ function displayWhatEgoPlayerIsCarrying(item) {
 function onGameStateChange(msg) {
   var $donationButtons = $('#individual-donate, #group-donate, #public-donate, #ingroup-donate'),
       $timeElement = $("#time"),
+      $ovenTimeElement = $("#oven-time"),
       $loading = $('.grid-loading'),
       cur_wall,
       ego,
@@ -1106,6 +1107,10 @@ function onGameStateChange(msg) {
 
   // Update remaining time.
   $timeElement.html(Math.max(Math.round(msg.remaining_time), 0));
+
+  // Update oven time.
+  if (msg.oven_in_use) $ovenTimeElement.html('Oven timer: ' + Math.max(Math.round(msg.oven_time_left), 0));
+  else $ovenTimeElement.html('Oven not in use');
 
   // Update round.
   if (settings.num_rounds > 1) {

@@ -145,10 +145,6 @@ prompt-toolkit==3.0.39
     # via ipython
 psutil==5.9.5
     # via dallinger
-psycopg2==2.9.6
-    # via
-    #   dallinger
-    #   sqlalchemy-postgres-copy
 ptyprocess==0.7.0
     # via pexpect
 pure-eval==0.2.2

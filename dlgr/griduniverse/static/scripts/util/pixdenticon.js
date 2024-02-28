@@ -43,6 +43,7 @@ Identicon.prototype = {
     },
 
     render: function(){
+
         var image      = this.image(),
             size       = this.size,
             baseMargin = Math.floor(size * this.margin),
@@ -65,6 +66,7 @@ Identicon.prototype = {
                 this.rectangle(0 * cell + margin, (i - 10) * cell + margin, cell, cell, color, image);
                 this.rectangle(4 * cell + margin, (i - 10) * cell + margin, cell, cell, color, image);
             }
+            
         }
 
         return image;

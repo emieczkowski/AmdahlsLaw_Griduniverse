@@ -12,6 +12,7 @@ import string
 import time
 import uuid
 from dataclasses import dataclass, field
+import threading
 
 import dallinger
 import flask
@@ -32,7 +33,6 @@ from .maze import Wall, labyrinth
 from .models import Event
 
 logger = logging.getLogger(__file__)
-
 
 GAME_CONFIG_FILE = "game_config.yml"
 
@@ -110,6 +110,11 @@ GU_PARAMS = {
     "donation_multiplier": float,
     "num_recruits": int,
     "state_interval": float,
+    "goal_items": int,
+    "game_over_cond": unicode,
+    "num_cook": int,
+    "cook_time": int,
+    "game_over_item": unicode
 }
 
 DEFAULT_ITEM_CONFIG = {
@@ -119,7 +124,6 @@ DEFAULT_ITEM_CONFIG = {
         "calories": 1,
     }
 }
-
 
 class PluralFormatter(string.Formatter):
     def format_field(self, value, format_spec):
@@ -161,6 +165,7 @@ class Gridworld(object):
 
     GREEN = [0.51, 0.69, 0.61]
     WHITE = [1.00, 1.00, 1.00]
+    
     wall_locations = None
     item_locations = None
     walls_updated = True
@@ -224,7 +229,7 @@ class Gridworld(object):
         self.contagion_hierarchy = kwargs.get("contagion_hierarchy", False)
         self.identity_signaling = kwargs.get("identity_signaling", False)
         self.identity_starts_visible = kwargs.get("identity_starts_visible", False)
-        self.use_identicons = kwargs.get("use_identicons", False)
+        self.use_identicons = kwargs.get("use_identicons", True)
 
         # Walls
         self.walls_visible = kwargs.get("walls_visible", True)
@@ -236,7 +241,7 @@ class Gridworld(object):
 
         # Payoffs
         self.initial_score = kwargs.get("initial_score", 0)
-        self.dollars_per_point = kwargs.get("dollars_per_point", 0.02)
+        self.dollars_per_point = kwargs.get("dollars_per_point", 0) # Change for reward
         self.tax = kwargs.get("tax", 0.00)
         self.relative_deprivation = kwargs.get("relative_deprivation", 1)
         self.frequency_dependence = kwargs.get("frequency_dependence", 0)
@@ -278,10 +283,22 @@ class Gridworld(object):
         )
         self.leach_survey = kwargs.get("leach_survey", False)
 
+        # Collab parameters
+        self.goal_items = kwargs.get("goal_items", 100)
+        self.num_cook = kwargs.get("num_cook", 1)
+        self.cook_time = kwargs.get("cook_time", 0)
+        self.game_over_cond = kwargs.get("game_over_cond", "time")
+        self.game_over_item = kwargs.get("game_over_item", "pie")
+
         # Set some variables.
         self.players = {}
         self.item_locations = {}
         self.items_consumed = []
+        self.items_cooked = []
+        self.items_dropped = []
+        self.items_cooking = 0
+        self.oven_in_use = False
+        self.oven_time_left = 0
         self.start_timestamp = kwargs.get("start_timestamp", None)
 
         self.round = 0
@@ -533,7 +550,12 @@ class Gridworld(object):
 
     @property
     def game_over(self):
-        return self.round >= self.num_rounds
+        if self.game_over_cond == "time":
+            return self.round >= self.num_rounds
+        elif self.game_over_cond == "foraging":
+            return len(self.items_consumed) == self.goal_items
+        elif self.game_over_cond == "cooking":
+            return len(self.items_dropped) == self.goal_items
 
     def serialize(self, include_walls=True, include_items=True):
         grid_data = {
@@ -595,10 +617,8 @@ class Gridworld(object):
     def instructions(self):
         color_costs = ""
         order = ""
-        text = """<p>The objective of the game is to maximize your final payoff.
-            The game is played on a {g.columns} x {g.rows} grid, where each
-            player occupies one block. <br><img src='static/images/gameplay.gif'
-            height='150'><br>"""
+        text = """<p>The objective of this game is to finish your task as quickly as possible.
+            The game is played on a {g.columns} x {g.rows} grid, where each player occupies one block."""
         if self.window_columns < self.columns or self.window_rows < self.rows:
             text += """ The grid is viewed through a
                 {g.window_columns} x {g.window_rows} window
@@ -619,9 +639,18 @@ class Gridworld(object):
             text += """ The game has {g.num_rounds} rounds, each lasting
                 <strong>{g.time_per_round} seconds</strong>.</p>"""
         else:
-            text += (
-                " The game duration is <strong>{g.time_per_round}</strong> seconds.</p>"
-            )
+            if self.game_over_cond == "time":
+                text += (
+                    " The game duration is <strong>{g.time_per_round}</strong> seconds.</p>"
+                )
+            elif self.game_over_cond == "foraging":
+                text += (
+                    "<p><strong>The game will end when you've collected all " + str(self.goal_items) + " apples and dropped them in the bucket.</strong></p>"
+                )
+            elif self.game_over_cond == "cooking":
+                text += (
+                    "<p><strong>The game will end when you've baked all " + str(self.goal_items) + " pies and dropped them somewhere on the grid.</strong></p>"
+                )     
         if self.num_players > 1:
             text += """<p>There are <strong>{g.num_players} players</strong> participating
                 in the game."""
@@ -667,7 +696,9 @@ class Gridworld(object):
                         text += """ Players will get more points if their
                             color is in the minority."""
         text += """</p><p>Players move around the grid using the arrow keys.
-                <br><img src='static/images/keys.gif' height='60'><br>"""
+                <br><img src='static/images/keys.gif' height='60'><br>
+                Players pick up and drop items using the spacebar.
+                """
         if self.player_overlap:
             text += " More than one player can occupy a block at the same time."
         else:
@@ -695,25 +726,37 @@ class Gridworld(object):
         if self.motion_tremble_rate >= 0.7:
             text += """ Movement commands will be ignored almost all of the time,
                 and the player will move in a random direction instead."""
-        text += """</p><p>Players gain points by getting to squares that have
-            food on them. Each piece of food is worth x
-            points. When the game starts there
-            are <strong>n</strong> pieces
-            of food on the grid. Food is represented by a green"""
+        if self.game_over_cond == "time":
+            text += """</p><p>Players gain points by getting to squares that have
+                food on them. Each piece of food is worth x
+                points. When the game starts there
+                are <strong>n</strong> pieces
+                of food on the grid. Food is represented by a green"""
 
-        text += " or brown"
-        text += " square: <img src='static/images/food-green.png' height='20'>"
-        text += " <img src='static/images/food-brown.png' height='20'>"
-        text += "<br>Food can be respawned after it is consumed."
+            text += " or brown"
+            text += " square: <img src='static/images/food-green.png' height='20'>"
+            text += " <img src='static/images/food-brown.png' height='20'>"
+            text += "<br>Food can be respawned after it is consumed."
 
-        text += """It will appear immediately, but may not be consumable for
-            some time if it has a maturation period. It will show
-            up as brown initially, and then as green when it matures."""
-        text += """<br>The location where the food will appear after respawning is
-            is determined by the <strong>configured</strong>
-            probability distribution for each item type."""
-        text += " Players may be able to plant more food by pressing the spacebar."
-        text += "</p>"
+            text += """It will appear immediately, but may not be consumable for
+                some time if it has a maturation period. It will show
+                up as brown initially, and then as green when it matures."""
+            text += """<br>The location where the food will appear after respawning is
+                is determined by the <strong>configured</strong>
+                probability distribution for each item type."""
+            text += " Players may be able to plant more food by pressing the spacebar."
+            text += "</p>"
+        if self.game_over_cond == "cooking":
+            text += """</p><p>Players pick up one apple at a time from the grid using the spacebar, 
+                and carry them to the oven. Players place the apple in the oven using the spacebar. 
+                When there are Y apples in the oven, the pie will begin to bake. The timer at the top 
+                of the screen indicates how much time is left until the pie is complete. While the pie is
+                baking, no more apples can be placed inside the oven. At the end of the timer, players will 
+                see a pie in the oven. Players need to take the pie out of the oven using the spacebar, 
+                and drop the pie on the ground using the ‘d’ key. """
+            text += "</p><p>"
+            text += "The game is complete when X pies are shown on the screen."
+            text += "</p>"   
         if self.alternate_consumption_donation and self.num_rounds > 1:
             text += """<p> Rounds will alternate between <strong>consumption</strong> and
             <strong>donation</strong> rounds. Consumption rounds will allow for free movement
@@ -792,6 +835,31 @@ class Gridworld(object):
         if consumed and item.public_good:
             for player_to in self.players.values():
                 player_to.score += item.public_good * consumed
+    
+    def cook(self, callback=None, position=None):
+        """Players need to put self.num_cook items in the oven to make 1 new food. 
+        The oven takes cook_time seconds to finish."""
+        for player in self.players.values():
+            position = tuple(player.position)
+            if position in self.item_locations:
+                item = self.item_locations[position]
+                if item.item_id == "oven":
+                    self.cooking_completed = False
+
+                    self.items_cooking += 1
+                    if (self.items_cooking == self.num_cook) and not self.oven_in_use: 
+                        self.oven_in_use = True
+
+                        for elapsed_time in range(self.cook_time, 0, -1):
+                            self.oven_time_left = elapsed_time
+                            time.sleep(1)
+
+                        if callback:
+                            callback(position)
+                
+                        self.items_cooked.append(item)
+                        self.oven_in_use = False
+                        self.items_cooking = 0
 
     def spawn_item(self, position=None, item_id=None):
         """Respawn an item for a single position"""
@@ -809,11 +877,13 @@ class Gridworld(object):
             position = self._find_empty_position(item_id)
 
         item_props = self.item_config[item_id]
+
         new_item = Item(
             id=(len(self.item_locations) + len(self.items_consumed)),
             position=position,
             item_config=item_props,
         )
+
         self.item_locations[tuple(position)] = new_item
         self.items_updated = True
         logger.warning(f"Spawning new item: {new_item}")
@@ -1686,6 +1756,16 @@ class Griduniverse(Experiment):
         player.current_item = location_item
         self.grid.items_updated = True
 
+    def cooking_complete_callback(self, position):
+        """Callback function to be called when cooking is completed (threading)."""
+        new_oven = Item(
+            id=len(self.grid.item_locations) + len(self.grid.items_consumed),
+            position=position,
+            item_config=self.item_config["oven_with_pie"],
+        )
+        self.grid.item_locations[position] = new_oven
+        self.grid.items_updated = True
+
     def handle_item_transition(self, msg):
         player = self.grid.players[msg["player_id"]]
         player_item = player.current_item
@@ -1715,46 +1795,55 @@ class Griduniverse(Experiment):
             }
             self.publish(error_msg)
             return
+        
+        # The item is being put in the oven
+        if transition["target_start"] == "oven":
+            if not self.grid.oven_in_use:
+                player.current_item = None
+                position = tuple(msg["position"])
+                cook_thread = threading.Thread(target=self.grid.cook, args=(self.cooking_complete_callback, position))
+                cook_thread.start()
 
-        # these values may be positive or negative, so we may add or remove uses
-        modify_actor_uses, modify_target_uses = transition.get("modify_uses", (0, 0))
-        if player_item and player_item.remaining_uses:
-            player_item.remaining_uses += modify_actor_uses
-        if location_item and location_item.remaining_uses:
-            location_item.remaining_uses += modify_target_uses
+        else:
+            # these values may be positive or negative, so we may add or remove uses
+            modify_actor_uses, modify_target_uses = transition.get("modify_uses", (0, 0))
+            if player_item and player_item.remaining_uses:
+                player_item.remaining_uses += modify_actor_uses
+            if location_item and location_item.remaining_uses:
+                location_item.remaining_uses += modify_target_uses
 
-        # An item that is replaced or has no remaining uses has been "consumed"
-        if player_item and (
-            (player_item.remaining_uses < 1) or transition["actor_end"] != actor_key
-        ):
-            self.grid.items_consumed.append(player_item)
-            player.current_item = None
-            self.grid.items_updated = True
-        if location_item and (
-            (location_item.remaining_uses < 1) or transition["target_end"] != target_key
-        ):
-            del self.grid.item_locations[position]
-            self.grid.items_consumed.append(location_item)
-            self.grid.items_updated = True
+            # An item that is replaced or has no remaining uses has been "consumed"
+            if player_item and (
+                (player_item.remaining_uses < 1) or transition["actor_end"] != actor_key
+            ):
+                self.grid.items_consumed.append(player_item)
+                player.current_item = None
+                self.grid.items_updated = True
+            if location_item and (
+                (location_item.remaining_uses < 1) or transition["target_end"] != target_key
+            ):
+                del self.grid.item_locations[position]
+                self.grid.items_consumed.append(location_item)
+                self.grid.items_updated = True
 
-        # The player's item type has changed
-        if transition["actor_end"] != actor_key:
-            new_player_item = Item(
-                id=len(self.grid.item_locations) + len(self.grid.items_consumed),
-                item_config=self.item_config[transition["actor_end"]],
-            )
-            player.current_item = new_player_item
-            self.grid.items_updated = True
+            # The player's item type has changed
+            if transition["actor_end"] != actor_key:
+                new_player_item = Item(
+                    id=len(self.grid.item_locations) + len(self.grid.items_consumed),
+                    item_config=self.item_config[transition["actor_end"]],
+                )
+                player.current_item = new_player_item
+                self.grid.items_updated = True
 
-        # The location's item type has changed
-        if transition["target_end"] != target_key:
-            new_target_item = Item(
-                id=len(self.grid.item_locations) + len(self.grid.items_consumed),
-                position=position,
-                item_config=self.item_config[transition["target_end"]],
-            )
-            self.grid.item_locations[position] = new_target_item
-            self.grid.items_updated = True
+            # The location's item type has changed
+            if transition["target_end"] != target_key:
+                new_target_item = Item(
+                    id=len(self.grid.item_locations) + len(self.grid.items_consumed),
+                    position=position,
+                    item_config=self.item_config[transition["target_end"]],
+                )
+                self.grid.item_locations[position] = new_target_item
+                self.grid.items_updated = True   
 
     def handle_item_drop(self, msg):
         player = self.grid.players[msg["player_id"]]
@@ -1775,6 +1864,8 @@ class Griduniverse(Experiment):
         self.grid.item_locations[position] = player_item
         player.current_item = None
         self.grid.items_updated = True
+        if player_item.item_id == self.grid.game_over_item:
+            self.grid.items_dropped.append(player_item) 
 
     def send_state_thread(self):
         """Publish the current state of the grid and game"""
@@ -1819,13 +1910,33 @@ class Griduniverse(Experiment):
             if update_items:
                 last_items = grid_state["items"]
 
-            message = {
-                "type": "state",
-                "grid": json.dumps(grid_state),
-                "count": count,
-                "remaining_time": self.grid.remaining_round_time,
-                "round": self.grid.round,
-            }
+            if self.grid.game_over_cond == "time":
+                message = {
+                    "type": "state",
+                    "grid": json.dumps(grid_state),
+                    "count": count,
+                    "remaining_time": self.grid.remaining_round_time,
+                    "round": self.grid.round,
+                }
+            elif self.grid.game_over_cond == "foraging":
+                message = {
+                    "type": "state",
+                    "grid": json.dumps(grid_state),
+                    "count": count,
+                    "remaining_time": self.grid.goal_items - len(self.grid.items_consumed),
+                    "round": self.grid.round,
+                }
+
+            elif self.grid.game_over_cond == "cooking":
+                message = {
+                    "type": "state",
+                    "grid": json.dumps(grid_state),
+                    "count": count,
+                    "remaining_time": self.grid.goal_items - len(self.grid.items_cooked),
+                    "oven_time_left": self.grid.oven_time_left,
+                    "oven_in_use": self.grid.oven_in_use,
+                    "round": self.grid.round,
+                }
 
             self.publish(message)
             if self.grid.game_over:
@@ -2034,6 +2145,8 @@ class Griduniverse(Experiment):
                 "grid": state,
                 "count": self.state_count,
                 "remaining_time": self.grid.remaining_round_time,
+                "oven_time_left": self.grid.oven_time_left,
+                "oven_in_use": self.oven_in_use,
                 "round": state["round"],
             }
             self.grid.deserialize(state)
