@@ -1,1 +1,1 @@
-web: gunicorn myapp:amdahlingriduniverse
+web: gunicorn experiment:app
