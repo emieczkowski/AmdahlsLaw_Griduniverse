@@ -1,3 +1,1 @@
-web: dallinger_heroku_web
-worker: dallinger_heroku_worker
-clock: dallinger_heroku_clock
+web: dallinger develop
