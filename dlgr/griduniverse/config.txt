@@ -45,3 +45,5 @@ num_dynos_worker = 1
 host = 0.0.0.0
 clock_on = false
 logfile = -
+
+docker_image_base_name = ghcr.io/dallinger/dallinger/griduniverse
