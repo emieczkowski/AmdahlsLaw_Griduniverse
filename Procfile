@@ -1,1 +1,1 @@
-web: dallinger develop
+web: dallinger_heroku_web
