@@ -39,7 +39,7 @@ database_url = postgresql://dallinger:dallinger@localhost/dallinger
 database_size = standard-0
 
 [Server Parameters]
-dyno_type = standard-2x
+dyno_type = basic
 num_dynos_web = 1
 num_dynos_worker = 1
 host = 0.0.0.0
